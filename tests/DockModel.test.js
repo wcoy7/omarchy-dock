@@ -378,3 +378,128 @@ test("desktopIdForWindow prefers exact id over Name fallback", () => {
   assert.equal(model.desktopIdForWindow("firefox", entries), "firefox")
   assert.equal(model.desktopIdForWindow("unknown-app", entries), "unknown-app")
 })
+
+test("an existing empty pin list stays empty", () => {
+  assert.deepEqual(Array.from(model.DEFAULT_PINNED), [])
+  assert.deepEqual(Array.from(model.parsePinned('{"version":1,"pinned":[]}', model.DEFAULT_PINNED)), [])
+  assert.deepEqual(Array.from(model.parsePinned("", [])), [])
+})
+
+test("fresh-install pins follow the macOS order and skip missing apps", () => {
+  const entries = [
+    { id: "org.gnome.Nautilus", name: "Files" },
+    { id: "org.kde.dolphin", name: "Dolphin" },
+    { id: "firefox", name: "Firefox" },
+    { id: "chromium", name: "Chromium" },
+    { id: "foot", name: "Foot" },
+    { id: "kitty", name: "Kitty" },
+    { id: "HEY", name: "HEY" },
+    { id: "org.gnome.Calendar", name: "Calendar" },
+    { id: "obsidian", name: "Obsidian" },
+    { id: "org.gnome.Settings", name: "Settings" },
+    { id: "spotify", name: "Spotify" },
+  ]
+  const pins = model.resolveDefaultPins(entries, {
+    defaultBrowser: "firefox.desktop",
+    defaultTerminal: "kitty.desktop",
+  })
+  assert.deepEqual(Array.from(pins), [
+    "org.gnome.Nautilus",
+    model.LAUNCHPAD_ID,
+    "firefox",
+    "kitty",
+    "HEY",
+    "org.gnome.Calendar",
+    "obsidian",
+  ])
+  assert.equal(pins.length <= model.DEFAULT_PIN_LIMIT, true)
+  assert.equal(pins.includes("org.gnome.Settings"), false)
+  assert.equal(pins.includes("spotify"), false)
+  assert.equal(pins.includes("chromium"), false)
+})
+
+test("default pins omit apps that are not installed", () => {
+  const pins = model.resolveDefaultPins([
+    { id: "org.kde.dolphin", name: "Dolphin" },
+    { id: "chromium", name: "Chromium" },
+  ])
+  assert.deepEqual(Array.from(pins), ["org.kde.dolphin", model.LAUNCHPAD_ID, "chromium"])
+})
+
+test("file manager falls back to a FileManager desktop entry", () => {
+  const pins = model.resolveDefaultPins([
+    { id: "thunar", name: "Thunar", categories: ["Utility", "FileManager"] },
+    { id: "foot", name: "Foot", categories: "System;TerminalEmulator;" },
+  ])
+  assert.deepEqual(Array.from(pins), ["thunar", model.LAUNCHPAD_ID, "foot"])
+})
+
+test("default browser is used only when that desktop entry exists", () => {
+  const entries = [
+    { id: "chromium", name: "Chromium", categories: "Network;WebBrowser;" },
+    { id: "firefox", name: "Firefox", categories: "Network;WebBrowser;" },
+  ]
+  assert.deepEqual(Array.from(model.resolveDefaultPins(entries, { defaultBrowser: "firefox" })), [
+    model.LAUNCHPAD_ID,
+    "firefox",
+  ])
+  assert.deepEqual(Array.from(model.resolveDefaultPins(entries, { defaultBrowser: "not-installed.desktop" })), [
+    model.LAUNCHPAD_ID,
+    "chromium",
+  ])
+})
+
+test("hidden desktop entries are never pinned", () => {
+  const pins = model.resolveDefaultPins([
+    { id: "omarchy-browser", name: "Browser", noDisplay: true, categories: "Network;WebBrowser;" },
+    { id: "chromium", name: "Chromium" },
+    { id: "org.gnome.Nautilus", name: "Files", NoDisplay: "true" },
+    { id: "org.kde.dolphin", name: "Dolphin", categories: "FileManager" },
+  ], { defaultBrowser: "omarchy-browser.desktop" })
+  assert.deepEqual(Array.from(pins), ["org.kde.dolphin", model.LAUNCHPAD_ID, "chromium"])
+})
+
+test("Launchpad is a built-in pin with no desktop entry", () => {
+  const pins = model.resolveDefaultPins([])
+  assert.deepEqual(Array.from(pins), [model.LAUNCHPAD_ID])
+  const entry = model.entryFor(model.LAUNCHPAD_ID, [])
+  assert.equal(entry.name, "Launchpad")
+  assert.equal(entry.icon, "view-app-grid-symbolic")
+  assert.equal(model.isLaunchpadId(" __launchpad__.desktop "), true)
+  const items = model.buildDockItems(pins, [], [])
+  assert.equal(items[0].id, model.LAUNCHPAD_ID)
+  assert.equal(items[0].name, "Launchpad")
+  assert.equal(items[0].icon, "view-app-grid-symbolic")
+})
+
+test("optional Omarchy apps fill the dock only when installed", () => {
+  const pins = model.resolveDefaultPins([
+    { id: "foot", name: "Foot" },
+    { id: "md.obsidian.Obsidian", name: "Obsidian" },
+    { desktopId: "Google Calendar.desktop", name: "Google Calendar" },
+    { id: "gnome-control-center", name: "Settings" },
+  ])
+  assert.deepEqual(Array.from(pins), [
+    model.LAUNCHPAD_ID,
+    "foot",
+    "Google Calendar",
+    "md.obsidian.Obsidian",
+    "gnome-control-center",
+  ])
+})
+
+test("default app probe parses browser and terminal ids", () => {
+  const parsed = model.parseDefaultAppProbe("browser=firefox.desktop\nterminal=foot.desktop:foot\n")
+  assert.equal(parsed.defaultBrowser, "firefox")
+  assert.equal(parsed.defaultTerminal, "foot")
+  const empty = model.parseDefaultAppProbe("")
+  assert.equal(empty.defaultBrowser, "")
+  assert.equal(empty.defaultTerminal, "")
+  const blank = model.parseDefaultAppProbe("browser=\nterminal=\n")
+  assert.equal(blank.defaultBrowser, "")
+  assert.equal(blank.defaultTerminal, "")
+  const script = model.defaultAppsProbeScript()
+  assert.equal(script.includes("xdg-settings get default-web-browser"), true)
+  assert.equal(script.includes("xdg-terminal-exec --print-id"), true)
+  assert.equal(script.includes("omarchy-default-terminal"), true)
+})

@@ -240,6 +240,221 @@ function orderPinned(order, pinnedIds) {
     return result
 }
 
+// Built-in Launchpad pin. It is not a desktop entry: clicking it asks the
+// first-party dock to toggle its app grid (`omarchy-shell omarchy.dock apps`).
+// This is the only id resolveDefaultPins may write without a matching entry.
+var LAUNCHPAD_ID = "__launchpad__"
+var LAUNCHPAD_NAME = "Launchpad"
+var LAUNCHPAD_ICON = "view-app-grid-symbolic"
+var DEFAULT_PIN_LIMIT = 7
+
+var FILE_MANAGER_CANDIDATES = [
+    "org.gnome.Nautilus",
+    "nautilus",
+    "org.kde.dolphin",
+    "dolphin",
+    "org.xfce.Thunar",
+    "thunar",
+    "org.gnome.Nemo",
+    "nemo",
+    "pcmanfm",
+    "pcmanfm-qt",
+    "io.elementary.files"
+]
+
+var BROWSER_CANDIDATES = [
+    "chromium",
+    "org.chromium.Chromium",
+    "google-chrome",
+    "google-chrome-stable",
+    "firefox",
+    "org.mozilla.firefox",
+    "brave-browser",
+    "microsoft-edge",
+    "helium"
+]
+
+var TERMINAL_CANDIDATES = [
+    "foot",
+    "kitty",
+    "com.mitchellh.ghostty",
+    "Alacritty",
+    "alacritty",
+    "org.gnome.Terminal"
+]
+
+function isLaunchpadId(id) {
+    return normalizeId(id) === LAUNCHPAD_ID
+}
+
+function isNoDisplayEntry(entry) {
+    if (!entry) return false
+    var value = entry.noDisplay
+    if (value === undefined) value = entry.NoDisplay
+    if (value === true || value === 1) return true
+    var text = String(value == null ? "" : value).toLowerCase()
+    return text === "true" || text === "1"
+}
+
+function categoryText(entry) {
+    var value = entry.categories
+    if (value === undefined) value = entry.Categories
+    if (Array.isArray(value)) return value.join(";").toLowerCase()
+    return String(value || "").toLowerCase()
+}
+
+// Visible desktop entries only. Hidden handlers (NoDisplay) are not pins.
+function visibleDesktopEntries(entries) {
+    var result = []
+    var seen = {}
+    ;(entries || []).forEach(function(row) {
+        var entry = row && row.entry ? row.entry : row
+        if (!entry || isNoDisplayEntry(entry)) return
+        var id = normalizeId(entry.id || entry.desktopId)
+        if (!id || seen[id]) return
+        seen[id] = true
+        result.push({
+            id: id,
+            name: String(entry.name || entry.displayName || ""),
+            categories: categoryText(entry)
+        })
+    })
+    return result
+}
+
+function lookupEntryId(list, candidates) {
+    var wanted = []
+    if (Array.isArray(candidates)) wanted = candidates
+    else if (candidates) wanted = [candidates]
+    for (var i = 0; i < wanted.length; i++) {
+        var needle = normalizeId(wanted[i]).toLowerCase()
+        if (!needle) continue
+        for (var j = 0; j < list.length; j++) {
+            if (list[j].id.toLowerCase() === needle) return list[j].id
+        }
+    }
+    return ""
+}
+
+function findByCategory(list, role) {
+    var token = String(role || "").toLowerCase()
+    if (!token) return ""
+    for (var i = 0; i < list.length; i++) {
+        var cats = ";" + list[i].categories + ";"
+        if (cats.indexOf(";" + token + ";") !== -1) return list[i].id
+    }
+    return ""
+}
+
+function findFileManager(list) {
+    var known = lookupEntryId(list, FILE_MANAGER_CANDIDATES)
+    if (known) return known
+    var byRole = findByCategory(list, "filemanager")
+    if (byRole) return byRole
+    for (var i = 0; i < list.length; i++) {
+        var id = list[i].id.toLowerCase()
+        var name = list[i].name.toLowerCase()
+        if (id.indexOf("nautilus") !== -1 || id.indexOf("dolphin") !== -1
+            || id.indexOf("thunar") !== -1 || id.indexOf("nemo") !== -1)
+            return list[i].id
+        if (name === "files" || name === "file manager") return list[i].id
+    }
+    return ""
+}
+
+function findCalendar(list) {
+    var known = lookupEntryId(list, ["org.gnome.Calendar", "gnome-calendar"])
+    if (known) return known
+    for (var i = 0; i < list.length; i++) {
+        var id = list[i].id.toLowerCase()
+        var name = list[i].name.toLowerCase()
+        if (id.indexOf("settings") !== -1 || name.indexOf("settings") !== -1) continue
+        if (id === "calendar" || name === "calendar" || name === "hey calendar"
+            || id.indexOf("calendar") !== -1 || name.indexOf("calendar") !== -1)
+            return list[i].id
+    }
+    return ""
+}
+
+// macOS-like first pins for a machine that has no pin file yet. Every id
+// except Launchpad must be a visible desktop entry; missing apps are skipped.
+// The result is capped so a fresh dock stays short.
+function resolveDefaultPins(entries, options) {
+    var opts = options || {}
+    var list = visibleDesktopEntries(entries)
+    var result = []
+
+    function add(id) {
+        var value = normalizeId(id)
+        if (!value || result.indexOf(value) !== -1) return
+        if (result.length >= DEFAULT_PIN_LIMIT) return
+        result.push(value)
+    }
+
+    var files = findFileManager(list)
+    if (files) add(files)
+    add(LAUNCHPAD_ID)
+
+    var browser = lookupEntryId(list, opts.defaultBrowser)
+        || lookupEntryId(list, BROWSER_CANDIDATES)
+        || findByCategory(list, "webbrowser")
+    if (browser) add(browser)
+
+    var terminal = lookupEntryId(list, opts.defaultTerminal)
+        || lookupEntryId(list, TERMINAL_CANDIDATES)
+        || findByCategory(list, "terminalemulator")
+    if (terminal) add(terminal)
+
+    var hey = lookupEntryId(list, ["HEY", "hey"])
+    if (hey) add(hey)
+    var calendar = findCalendar(list)
+    if (calendar) add(calendar)
+    var obsidian = lookupEntryId(list, ["obsidian", "md.obsidian.Obsidian"])
+    if (obsidian) add(obsidian)
+    var settings = lookupEntryId(list, ["org.gnome.Settings", "gnome-control-center"])
+    if (settings) add(settings)
+    return result
+}
+
+// `xdg-settings` / `xdg-terminal-exec` probe printed by defaultAppsProbeScript.
+function parseDefaultAppProbe(text) {
+    var browser = ""
+    var terminal = ""
+    String(text || "").split(/\r?\n/).forEach(function(line) {
+        var trimmed = String(line || "").trim()
+        var browserAt = trimmed.indexOf("browser=")
+        var terminalAt = trimmed.indexOf("terminal=")
+        if (browserAt === 0) browser = probeDesktopId(trimmed.slice(8))
+        else if (terminalAt === 0) terminal = probeDesktopId(trimmed.slice(9))
+    })
+    return { defaultBrowser: browser, defaultTerminal: terminal }
+}
+
+function probeDesktopId(value) {
+    var text = String(value || "").trim()
+    var colon = text.indexOf(":")
+    if (colon >= 0) text = text.slice(0, colon).trim()
+    return normalizeId(text)
+}
+
+function defaultAppsProbeScript() {
+    return [
+        "browser=$(xdg-settings get default-web-browser 2>/dev/null || true)",
+        "terminal=$(xdg-terminal-exec --print-id 2>/dev/null || true)",
+        "terminal=${terminal%%:*}",
+        "if [ -z \"$terminal\" ] && command -v omarchy-default-terminal >/dev/null 2>&1; then",
+        "  name=$(omarchy-default-terminal 2>/dev/null || true)",
+        "  case \"$name\" in",
+        "    alacritty) terminal=Alacritty.desktop ;;",
+        "    foot) terminal=foot.desktop ;;",
+        "    ghostty) terminal=com.mitchellh.ghostty.desktop ;;",
+        "    kitty) terminal=kitty.desktop ;;",
+        "  esac",
+        "fi",
+        "printf 'browser=%s\\nterminal=%s\\n' \"$browser\" \"$terminal\""
+    ].join("\n")
+}
+
 // Smooth pointer wave used by the dock. The cosine falloff keeps the hover
 // response soft at both ends of the reach; the matching ramp is its integral,
 // so neighboring slots move exactly far enough to make room for the growth.
@@ -368,6 +583,8 @@ function desktopIdForWindow(rawId, entries) {
 function entryFor(id, entries) {
     var value = normalizeId(id)
     var list = entries || []
+    if (isLaunchpadId(value))
+        return { id: LAUNCHPAD_ID, name: LAUNCHPAD_NAME, icon: LAUNCHPAD_ICON, builtin: true }
     var lowerValue = value.toLowerCase()
     for (var i = 0; i < list.length; i++) {
         var entry = list[i] && list[i].entry ? list[i].entry : (list[i] || {})
@@ -521,6 +738,14 @@ if (typeof module !== "undefined" && module.exports) {
         resetSettingsGuard: resetSettingsGuard,
         shouldHideDock: shouldHideDock,
         shouldScheduleHide: shouldScheduleHide,
-        shouldRevealDock: shouldRevealDock
+        shouldRevealDock: shouldRevealDock,
+        LAUNCHPAD_ID: LAUNCHPAD_ID,
+        LAUNCHPAD_NAME: LAUNCHPAD_NAME,
+        LAUNCHPAD_ICON: LAUNCHPAD_ICON,
+        DEFAULT_PIN_LIMIT: DEFAULT_PIN_LIMIT,
+        isLaunchpadId: isLaunchpadId,
+        resolveDefaultPins: resolveDefaultPins,
+        parseDefaultAppProbe: parseDefaultAppProbe,
+        defaultAppsProbeScript: defaultAppsProbeScript
     }
 }
