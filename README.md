@@ -52,6 +52,18 @@ The dock stores pins and auto-hide preference in:
 ~/.config/omarchy/dock-settings.json
 ```
 
+On a fresh install, when `dock-pinned-macos.json` does not exist yet, the dock
+writes a short macOS-like pin list and then treats that file like any other
+pin file. The order is a file manager (Nautilus when it is installed, otherwise
+another file-manager entry), Launchpad, the default browser, the terminal, then
+a few Omarchy apps that are actually installed — HEY, a calendar, Obsidian, or
+Settings — stopping at about seven icons. Launchpad is a built-in item, not a
+`.desktop` file: it uses the `view-app-grid-symbolic` icon and runs
+`omarchy-shell omarchy.dock apps` to open Omarchy's app grid. Every other pin
+is skipped when its desktop entry is missing, and an id is never written for
+an app that is not installed. A pin file that is already there is left alone,
+including one whose `pinned` list is empty on purpose.
+
 ## Requirements and removal
 
 This plugin requires Omarchy with Quickshell, plus `bash`, `curl`, `python3`,
@@ -82,9 +94,11 @@ omarchy restart shell
 ```
 
 The plugin does not overwrite existing Omarchy or user configuration files.
-It only creates or updates its own files under `~/.config/omarchy/` after the
-user explicitly invokes a dock action or the custom-icon helper. Custom icon
-files and mappings can be removed with `omarchy-dock-icon clear <app-id>`.
+It only creates or updates its own files under `~/.config/omarchy/`. The pin
+file is created on first launch when it is absent; an existing pin file is
+never replaced. Other dock files are written when a setting changes or the
+custom-icon helper runs. Custom icon files and mappings can be removed with
+`omarchy-dock-icon clear <app-id>`.
 
 The repository author owns this plugin and has permission to submit the source
 code and preview assets. External icons downloaded from macOSicons remain
@@ -281,6 +295,11 @@ For reference, the companion files with all defaults applied:
   "order": []
 }
 ```
+
+That empty document is what an explicit "pin nothing" choice looks like, and
+the dock will not fill it back in. When the file is missing, the first launch
+writes the same shape with the installed defaults described under Install
+(`__launchpad__` is the built-in app-grid pin).
 
 `~/.config/omarchy/dock-icons.json`:
 

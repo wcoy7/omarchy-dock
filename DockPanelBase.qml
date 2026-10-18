@@ -21,6 +21,15 @@ Item {
   property var pinnedIds: []
   property var dockOrder: []
   property bool pinFileLoaded: false
+  // Defaults are written only when the pin file is absent. An existing file,
+  // including one whose pinned list is empty, is never replaced.
+  property bool pinFileMissing: false
+  property bool defaultsSeeded: false
+  property bool appsSnapshotReady: false
+  property bool defaultAppsResolved: false
+  property string defaultBrowserId: ""
+  property string defaultTerminalId: ""
+  property string defaultAppsProbeText: ""
   // Our temp+rename writes make the pin-file watcher fire before FileView's
   // async re-read finishes, so onFileChanged can observe stale text(). The
   // reload() path re-reads fresh, and this window skips watcher events that
@@ -448,7 +457,39 @@ Item {
       root.appEntries = DockModel.mergeAppEntries(libraryEntries, [])
       root.appLibraryReady = root.appEntries.length > 0
     }
+    if (root.appEntries.length > 0) root.appsSnapshotReady = true
+    root.maybeSeedDefaultPins()
     refreshItems()
+  }
+
+  // Write the macOS-like default pins once the desktop list and the
+  // browser/terminal probe are both in. Never replaces a pin file that
+  // already exists, and never pins an id that has no desktop entry
+  // (Launchpad is the built-in exception).
+  function maybeSeedDefaultPins() {
+    if (root.defaultsSeeded || !root.pinFileMissing) return
+    if (!root.defaultAppsResolved) return
+    if (!root.appsSnapshotReady && !(root.appEntries && root.appEntries.length)) return
+    var pins = DockModel.resolveDefaultPins(root.appEntries, {
+      defaultBrowser: root.defaultBrowserId,
+      defaultTerminal: root.defaultTerminalId
+    })
+    root.defaultsSeeded = true
+    root.pinFileMissing = false
+    root.pinFileLoaded = true
+    defaultPinSettleTimer.stop()
+    root.pinnedIds = pins
+    root.dockOrder = pins.slice()
+    root.savePinned()
+  }
+
+  function applyDefaultAppProbe(text) {
+    if (root.defaultAppsResolved) return
+    var parsed = DockModel.parseDefaultAppProbe(text || "")
+    root.defaultBrowserId = parsed.defaultBrowser
+    root.defaultTerminalId = parsed.defaultTerminal
+    root.defaultAppsResolved = true
+    root.maybeSeedDefaultPins()
   }
 
   function refreshItems() {
@@ -646,6 +687,10 @@ Item {
   // Omarchy 4.0.3 scopes appLibrary away from panel plugins. Keep using the
   // shell service when available, with the UWSM desktop-entry path as fallback.
   function launchApp(id, name) {
+    if (DockModel.isLaunchpadId(id)) {
+      root.openLaunchpad()
+      return true
+    }
     var appId = String(id || "").replace(/\.desktop$/, "")
     if (!appId) return false
     if (root.shell && root.shell.appLibrary && typeof root.shell.appLibrary.launch === "function") {
@@ -658,6 +703,10 @@ Item {
 
   function handleClick(item) {
     if (!item) return
+    if (DockModel.isLaunchpadId(item.id)) {
+      root.openLaunchpad()
+      return
+    }
     if (item.running) {
       try {
         // Never fall back to Toplevel.activate() here: it can warp the cursor.
@@ -673,6 +722,13 @@ Item {
     // RUNNING in refreshItems), not here — so the motion coincides with the
     // app appearing, like the native Dock.
     root.launchApp(item.id, (entry && entry.name) || item.name)
+  }
+
+  // Omarchy's app grid lives on the first-party dock service, not a .desktop
+  // file. `omarchy-shell omarchy.dock apps` toggles it.
+  function openLaunchpad() {
+    hideTimer.stop()
+    Quickshell.execDetached(["omarchy-shell", "-q", "omarchy.dock", "apps"])
   }
 
   function openDownloads() {
@@ -841,6 +897,14 @@ Item {
   }
 
   function savePinned() {
+    // A pin change before the fresh-install seed means the user already has
+    // a list. Keep that write and do not follow it with the defaults.
+    if (root.pinFileMissing && !root.defaultsSeeded) {
+      root.pinFileMissing = false
+      root.defaultsSeeded = true
+      root.pinFileLoaded = true
+      defaultPinSettleTimer.stop()
+    }
     var content = DockModel.serializePinned(root.pinnedIds, root.dockOrder)
     root.ownWriteUntil = Date.now() + 2000
     DockModel.markWritten(content)
@@ -1391,6 +1455,10 @@ Item {
     atomicWrites: true
     printErrors: false
     onLoaded: {
+      // The file is present, even when its pinned list is empty on purpose.
+      root.pinFileMissing = false
+      root.defaultsSeeded = true
+      defaultPinSettleTimer.stop()
       if (!root.pinFileLoaded) {
         root.pinFileLoaded = true
         root.pinnedIds = DockModel.parsePinned(text(), DockModel.DEFAULT_PINNED)
@@ -1410,9 +1478,40 @@ Item {
       pinFile.reload()
     }
     onLoadFailed: {
-      root.pinFileLoaded = true
-      root.pinnedIds = DockModel.DEFAULT_PINNED.slice()
-      root.refreshItems()
+      if (root.defaultsSeeded) return
+      root.pinFileMissing = true
+      if (!defaultPinSettleTimer.running) defaultPinSettleTimer.start()
+      root.maybeSeedDefaultPins()
+      // Running apps can show before the desktop list settles. Leave
+      // pinFileLoaded false so this empty pass is not written to disk.
+      if (!root.defaultsSeeded) root.refreshItems()
+    }
+  }
+
+  // If desktop entries never arrive, still pin Launchpad rather than leaving
+  // a fresh dock blank forever. A non-empty list seeds immediately.
+  Timer {
+    id: defaultPinSettleTimer
+    interval: 1500
+    onTriggered: {
+      root.appsSnapshotReady = true
+      root.maybeSeedDefaultPins()
+    }
+  }
+
+  Process {
+    id: defaultAppsProcess
+    command: ["bash", "-c", DockModel.defaultAppsProbeScript()]
+    running: true
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.defaultAppsProbeText = String(text || "")
+        root.applyDefaultAppProbe(root.defaultAppsProbeText)
+      }
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.applyDefaultAppProbe("")
     }
   }
 
@@ -1500,7 +1599,11 @@ Item {
   }
   Connections {
     target: DesktopEntries.applications
-    function onValuesChanged() { root.refreshApps() }
+    function onValuesChanged() {
+      var values = DesktopEntries.applications.values || []
+      if (values.length > 0) root.appsSnapshotReady = true
+      root.refreshApps()
+    }
   }
   Connections {
     target: Hyprland
